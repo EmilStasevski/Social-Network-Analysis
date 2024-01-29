@@ -1,0 +1,743 @@
+---
+title: 'Military Deployment Network analysis'
+author: "Emil Staszewski"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE,message=FALSE,warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Введение
+
+Военное развертывание, как один из инструментов ведения внешней политики, в контексте последних геополитиеских событий, приобретает особую значимость. 
+
+Словарь военных и связанных с ними терминов определяет *военное развертывание* как перемещение вооруженных сил и их инфраструктуры тылового обеспечения по всему миру.
+
+Исторически и концептуально явление оформляется в годы Холодной Войны, за это время претерпев множетсво изменений:
+
+ - В эпоху Холодной Войны ключевой целью развертывания было военное сдерживание противника. Сеть развертываний поделена на два крупных враждующих лагеря - СССР и США, военные контингенты которых были распространены по всему миру с целью остановить распространения влияния враждебного лагеря и удержать регионы в своей зоне влияния
+ - После Холодной Войны сеть развертываний перестает быть биполярной - возникаю новые центры. СССР (то есть Россиия) после выводы войск из Европы временно перестает быть крупным центром развертывания. В бывших колониях даже после получения независимости все еще стоят крупные контигенты из Франции и Великобритании. Развертывание становится более ситуативным - помимо задач удержания влияния в регионе появляются новые: 
+ 
+    + Помощь мирового сообществам странам, находящимся в гуманитарном кризисе. (Например Балканским странам в 90е гг)
+    + Антитеррористическая операция 
+    + Миротворческие операции
+  
+
+
+Загрузим необходимые библиотеки
+
+
+```{r,message=FALSE,warning=FALSE}
+library(readxl)
+library(tidyverse)
+library(modelsummary)
+library(haven)
+options(scipen=999)
+library(sjPlot)
+library(tidygraph)
+library(igraph)
+library(ggraph)
+
+library(data.table)
+library(states)
+library(demcon)
+library(intergraph)
+library(ergm)
+
+
+colors3=c('#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231', '#911eb4', '#46f0f0', '#f032e6', '#bcf60c', '#fabebe', '#008080', '#e6beff', '#9a6324', '#fffac8', '#800000', '#aaffc3', '#808000', '#ffd8b1', '#000075', 'gold', '#ffffff', '#000000')
+```
+
+Загрузим дата сеты, содержащие данные о развертывании, численности национальных армий, военных расходах.
+
+```{r,message=FALSE,warning=FALSE}
+balance <- read_excel('~/Диффузия Code/check data/18.01.2023.xlsx.')
+decoder1=read_excel('~/Диффузия Code/data/coding.xlsx',sheet=1)
+decoder2=read_excel('~/Диффузия Code/data/coding.xlsx',sheet=2)
+
+
+balance %>% left_join(decoder1,by='ccode1') %>%
+  left_join(decoder2,by='ccode2')->balance
+
+
+
+
+balance$troops = as.numeric(balance$Troops)
+balance$joinl=paste(balance$year,balance$ccode1,sep='')
+
+milper=read_dta('~/Диффузия Code/data/NMC-60-abridged.dta')
+milper$milper=milper$milper*1000
+
+milper$joinl=paste(milper$year,milper$ccode,sep='')
+
+milper %>% dplyr::select(milper,milex,tpop,joinl)->milperj
+
+balance %>% 
+  left_join(milperj,by='joinl')->balance
+
+
+
+
+```
+
+
+Загружаем V-DEM датасет, для режимов стран отправителей войск.
+
+```{r,warning=FALSE,message=FALSE}
+vdem <- demcon::get_vdem(write_out = FALSE)
+
+
+```
+
+
+```{r}
+vdem$deployer_regime = vdem$regime
+vdem$receptor_regime = vdem$regime
+
+balance$code_join1=paste(balance$year,balance$Id_deployer,sep='')
+balance$code_join2=paste(balance$year,balance$Id_receptor,sep='')
+
+vdem$code_join1=paste(vdem$year,vdem$country_id,sep='')
+vdem$code_join2=paste(vdem$year,vdem$country_id,sep='')
+
+vdem %>% select(code_join1,deployer_regime,e_gdp,v2exdfvths,v2xlg_legcon)->vdem_regime_deployer
+vdem %>% select(code_join2,receptor_regime)->vdem_regime_receptor
+
+balance %>% left_join(vdem_regime_deployer,by='code_join1')->balance
+balance %>% left_join(vdem_regime_receptor,by='code_join2')->balance
+
+
+communities_countries <- read.csv('~/Диффузия Code/data/communities.csv')
+
+balance %>% left_join(communities_countries,by='ccode1')->balance
+
+```
+
+## Данные:
+
+В финальный соединеный датасет входят следующие переменные:
+
+
+ - Deployer - страна отправитеть (cowc1 и ccode1 ее числовой и буквенный коды)
+ - Receptor - страна, принимающая войска (cowc1 и ccode1 ее числовой и буквенный коды)
+ - Troops - количество войск, отправленных страной
+ - year - год отправления
+ - Additional_info - дполнительная информация о развертывании (военная техника, воинские подразделения и т д)
+ 
+ - deployer_regime - политический режим страны отправителя. Упрощенная версия кодировки V-DEM, в нашем случае она бинарная: либо демократия либо автократия
+ 
+ - deployer_continent - континент страны отправителя
+ - receptor_continent - континент страны получателя
+ - UN_mission - бинарная переменная - либо развертывание как миссия ООН либо нет
+ - NATO_mission - бинарная переменная, является ли развертывание операцией НАТО или нет
+ 
+
+*Исследовательскй вопрос:*
+
+Какие факторы определяют образование связей между странами с сети военного развертывания в 1985-2020 годах?
+
+
+### *Гипотезы*
+
+ - **Демократия на штыках** - в разные периоды будет наблюдаться разная гомофилия (или даже обратный процесс), то есть демократии не всегда будут отправлять войска в демократические страны. Такие крупные страны как США или Россия могут способствовать удержанию своих режимов и зон влияния **на штыках** отправленных войск. 
+ - Децентрализация - после Холодной войны начинается увеличивается континентальная гомофилия - страны отправляют свои войска в регионы своего же континента
+ - Между странами не существует гомофилии по уровню ВВП, страны с высоким ВВП чаще отправляют войска в страны с низким ВВП.
+
+
+Сначала создадим общий граф, и с помощью метрик опишем динамику его развитию.
+
+```{r}
+
+years <- c(1985:2022)
+
+
+density_vector <- c()
+
+for(x in years){
+  balance %>% filter(year==x) %>% 
+    dplyr::select(cowc1,cowc2,troops) %>% na.omit() %>% 
+    graph_from_data_frame() %>% graph.density()->new_value
+  density_vector <- c(density_vector,new_value)
+  
+}
+
+
+transitivity_vector <- c()
+
+for(i in years){
+  balance %>% filter(year==i) %>% 
+    dplyr::select(cowc1,cowc2,troops) %>% na.omit() %>% 
+    graph_from_data_frame() %>% transitivity()->new_value
+  transitivity_vector <- c(transitivity_vector,new_value)
+  
+}
+
+
+
+reciprocity_vector <- c()
+
+for(i in years){
+  balance %>% filter(year==i) %>% 
+    dplyr::select(cowc1,cowc2,troops) %>% na.omit() %>% 
+    graph_from_data_frame() %>% reciprocity()->new_value
+  reciprocity_vector <- c(reciprocity_vector,new_value)
+  
+}
+
+mod_table <- data.frame(years,density_vector,reciprocity_vector,transitivity_vector)
+
+mod_table %>% 
+  pivot_longer(
+    cols =c('density_vector':'transitivity_vector'),
+    names_to = 'graph metric',
+    values_to = 'value'
+  )->graph_metric_long
+
+graph_metric_long %>% 
+  ggplot(aes(years,value,fill=`graph metric`))+
+  geom_bar(stat='identity',position = position_dodge())+
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 10)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10))+
+  labs(title = 'Dynamics of graph metrics ',y='Graph Metrics',x='Year')+
+  scale_fill_manual(values = colors3)+
+  theme_bw()
+  
+
+```
+
+Можно заметить как с перебоями растет **плотность** графа, то есть вместо биполярного мира Холодной Войны страны становятся все более связанными между собой. В конце 90х она падает возможно в связи с развалом СССР, постепенно возрастая особенно в 2001 году - начало антитеррористических операций. Дальнейшие падения до 2014 года возможно последствия кризиса 2008 года. С 2014 года рост связан с началом военных кофликтов в Сирии, Африке и Украине, интересно что не серьезных падений плотности  в пандемию.
+
+**Реципрокность** - то есть ответное развертывание, появляется только после окончания Холодной Войны, как видно на графике - сильно скоррелированна с плотностью графа и подверженами похожим циклам.
+
+**Транзитивность графа**  - показатель доли закрытах триад,  стремление создавать закрытые сообщества.
+Падает после конца Холодной войны - сеть потеряла один из важнейших центров, в дальнейшем также подвержена цикличности, однако, не совпадающим с циклами плотности и реципрокности. 
+
+Посмотрим динамику сети на графах(в ходе рисования графиков были отдельно концептуально выделены 3 крупных сообщества - Европейский Альянс, США и их союзники, Россия с Африканскими и Азиатскими странами, и другие страны Азии, Африки)
+
+**Красным выделены автократии, синим - демократии**
+
+
+```{r, warning=FALSE,warning=FALSE}
+balance %>% filter(year==1985) %>% 
+  dplyr::select(deployer,receptor,troops,community_name,deployer_regime) %>% na.omit() %>% as_tbl_graph()-> g1985
+
+
+ggraph(g1985, layout = "fr") +
+  geom_edge_link( arrow = arrow(type = "closed",
+                                              angle = 25,
+                                              length = unit(1.5, 'mm')), 
+                 end_cap = circle(0.5, 'mm'), 
+                 aes(width=troops/10,color=community_name) , show.legend = FALSE) +
+  geom_node_point(aes(size=100*degree(g1985))) +
+  geom_node_text(aes(label = name), repel = TRUE, size = 3.7) +
+  labs(title ='Развертывание в 1985')+
+  theme_void()
+
+
+
+ggraph(g1985, layout = "fr") +
+  geom_edge_link( arrow = arrow(type = "closed",
+                                              angle = 25,
+                                              length = unit(1.5, 'mm')), 
+                 end_cap = circle(0.5, 'mm'), 
+                 aes(width=troops/10,color=deployer_regime) , show.legend = FALSE) +
+  geom_node_point(aes(size=100*degree(g1985))) +
+  geom_node_text(aes(label = name), repel = TRUE, size = 3.7) +
+  labs(title ='Демократия и развертывание в 1985')+
+  theme_void()
+```
+
+
+
+
+
+```{r,message=FALSE,warning=FALSE}
+balance %>% filter(year==2010) %>% 
+  dplyr::select(cowc1,cowc2,troops,community_name,deployer_regime) %>% 
+  na.omit()%>% as_tbl_graph()-> g2010
+
+
+ggraph(g2010, layout = "fr") +
+  geom_edge_link( arrow = arrow(type = "closed",
+                                angle = 25,
+                                length = unit(1.5, 'mm')), 
+                  end_cap = circle(0.5, 'mm'), 
+                  aes(width=troops/10,color=community_name) , show.legend = FALSE) +
+  geom_node_point(color='gold',aes(size=100*degree(g2010))) +
+  geom_node_text(aes(label = name,size=degree(g2010)*60,alpha=degree(g2010)*60), repel = TRUE) +
+  labs(title ='Развертывание в  2010')+
+  theme_void()
+
+
+
+ggraph(g2010, layout = "fr") +
+  geom_edge_link( arrow = arrow(type = "closed",
+                                angle = 25,
+                                length = unit(1.5, 'mm')), 
+                  end_cap = circle(0.5, 'mm'), 
+                  aes(width=troops/10,color=deployer_regime) , show.legend = FALSE) +
+  geom_node_point(color='gold',aes(size=100*degree(g2010))) +
+  geom_node_text(aes(label = name,size=degree(g2010)*60,alpha=degree(g2010)*60), repel = TRUE) +
+  labs(title ='Развертывание  и демократия в  2010')+
+  theme_void()
+```
+
+
+
+
+
+
+
+
+
+
+```{r,message=FALSE,warning=FALSE}
+balance %>% filter(year==2022) %>% 
+  dplyr::select(cowc1,cowc2,troops,community_name,deployer_regime) %>% 
+  na.omit()%>% as_tbl_graph()-> g2020
+
+
+ggraph(g2020, layout = "fr") +
+  geom_edge_link( arrow = arrow(type = "closed",
+                                angle = 25,
+                                length = unit(1.5, 'mm')), 
+                  end_cap = circle(0.5, 'mm'), 
+                  aes(width=troops/10,color=community_name) , show.legend = FALSE) +
+  geom_node_point(color='gold',aes(size=100*degree(g2020))) +
+  geom_node_text(aes(label = name,size=degree(g2020)*60,alpha=degree(g2020)*60), repel = TRUE) +
+  labs(title ='Развертывание в  2022')+
+  theme_void()
+
+
+
+ggraph(g2020, layout = "fr") +
+  geom_edge_link( arrow = arrow(type = "closed",
+                                angle = 25,
+                                length = unit(1.5, 'mm')), 
+                  end_cap = circle(0.5, 'mm'), 
+                  aes(width=troops/10,color=deployer_regime) , show.legend = FALSE) +
+  geom_node_point(color='gold',aes(size=100*degree(g2020))) +
+  geom_node_text(aes(label = name,size=degree(g2020)*60,alpha=degree(g2020)*60), repel = TRUE) +
+  labs(title ='Развертывание  и демократия в  2022')+
+  theme_void()
+```
+
+
+
+
+
+
+
+
+
+
+```{r,message=F,warning=FALSE}
+years <- c(1985:2022)
+
+degrees <- data.frame()
+betweennesses <- data.frame()
+degree_out <- data.frame()
+closenesses <- data.frame()
+alphaCentrality <- data.frame()
+for(i in years){
+  balance %>% filter(year==i) %>% dplyr::select(ccode1,ccode2,troops) %>% 
+    graph_from_data_frame()->g
+  n_d <- as.data.frame(degree(g))
+  year=c(rep(i,nrow(n_d)))
+  n_d$join=paste(year,rownames(n_d),sep='')
+  degrees <- rbind(degrees,n_d)
+  
+  b_d <- as.data.frame(betweenness(g))
+  b_d$join=paste(year,rownames(b_d),sep='')
+  betweennesses <- rbind(betweennesses,b_d)
+  
+  do_d <- as.data.frame(degree(g,mode='in'))
+  do_d$join=paste(year,rownames(do_d),sep='')
+  degree_out <- rbind(degree_out,do_d)
+  
+  c_d <- as.data.frame(closeness(g))
+  c_d$join=paste(year,rownames(c_d),sep='')
+  closenesses <- rbind(closenesses,c_d)
+  
+  a_d <- as.data.frame(alpha_centrality(g))
+  a_d$join=paste(year,rownames(a_d),sep='')
+  alphaCentrality <- rbind(alphaCentrality,do_d)
+
+
+
+}
+
+balance$join=paste(balance$year,balance$ccode1,sep='')
+
+
+balance %>% left_join(degrees,by='join') %>% 
+  left_join(betweennesses,by='join') %>% 
+  left_join(degree_out,by='join') %>% 
+  left_join(alphaCentrality,by='join') %>% 
+  left_join(closenesses,by='join')->balance
+
+balance %>% 
+  rename(degree =  `degree(g)`,
+         betweenness=`betweenness(g)`,
+         degree_in=`degree(g, mode = "in")`,
+        closeness =`closeness(g)`)->balance
+```
+
+
+*топ стран по числу степеней с годами*
+
+```{r,message=FALSE,warning=FALSE}
+tab1= balance  %>% arrange(-degree) %>% select(year,deployer) %>% unique() %>% head(n=10) 
+
+tab1 %>% knitr::kable("markdown")
+
+```
+
+
+*топ стран по числу степеней*
+
+```{r,message=FALSE,warning=FALSE}
+tab2= balance  %>% arrange(-degree) %>% select(deployer) %>% unique() %>% head(n=10)
+
+tab2  %>% knitr::kable("markdown")
+```
+
+
+*топ стран получателей войск с годами*
+
+```{r,message=FALSE,warning=FALSE}
+tab21 = balance  %>% arrange(-degree_in) %>% select(year,deployer) %>% unique() %>% head(n=10)
+
+tab21 %>% knitr::kable("markdown")
+```
+
+
+*топ стран получателей войск*
+
+```{r,message=FALSE,warning=FALSE}
+tab3 = balance  %>% arrange(-degree_in) %>% select(deployer) %>% unique() %>% head(n=10)
+
+tab3  %>% knitr::kable("markdown")
+```
+
+
+*топ стран объединяющих крупные сообщества *
+
+```{r,message=F,warning=FALSE}
+tab5 = balance  %>% arrange(-betweenness) %>% select(deployer) %>% unique() %>% head(n=10)
+tab5 %>% knitr::kable("markdown")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+*топ стран наиболее близких к остальным*
+
+
+```{r,message=FALSE,warning=FALSE}
+tab6 = balance  %>% arrange(-closeness) %>% select(deployer) %>% unique() %>% head(n=10)
+
+tab6 %>% knitr::kable("markdown")
+```
+
+
+
+
+Ожидаемые высокие значения по числу степеней у США,страны Африки как горячие точки также обладают высокими занчениями, неожиданно - маленькая Литва. Последнее возможно связано с тем, что Литва находится на границе соприкосновения альянсов Западной Европы и России, НАТО и ОДКБ.
+
+Крупнейшие страны получатели в основном горячие точки Африки и Азии, находящиеся в состоянии гуманитарного кризиса Сербия, Босния ,  а также снова Литва.
+
+
+В топы стран объединяющих подсообшества как и ожидалось вошли такие крупные геополитические игроки как США, Росссия,Саудовская Аравия. Топ стран, через которых проходят наиболее короткие пути возглавляет Бельгия, Дания и Греция, действительно в своих регионах они занимают стратегические местоположения.
+
+
+
+
+
+
+
+
+
+
+Перейдем к проверке наших гипотез, разделим сеть на 3 периода:
+
+ - Эпоху Холодной Войны (до 1992 года)
+ - Период после Холодной Войны и до 2014 года
+ 2014 год и дальше
+
+```{r,message=F,warning=FALSE}
+balance %>% 
+  filter(year <1992) %>% 
+  select(cowc1,cowc2,year,troops,deployer_regime,receptor_regime,milper,deployer_continent,
+         e_gdp) %>% 
+  na.omit()->Cold_War
+
+Cold_War_graph=Cold_War %>% graph_from_data_frame() 
+
+
+
+Cold_War_graph= Cold_War_graph %>% set_vertex_attr( "deployer_regime", index = V(Cold_War_graph), as.factor(Cold_War$deployer_regime)) %>% 
+  set_vertex_attr( "milper", index = V(Cold_War_graph), as.numeric(Cold_War$milper)) %>% 
+  set_vertex_attr( "e_gdp", index = V(Cold_War_graph), as.numeric(Cold_War$e_gdp)) %>% 
+  set_vertex_attr( "deployer_continent", index = V(Cold_War_graph), as.factor(Cold_War$deployer_continent))
+
+
+library(network)
+
+Cold_War_network <- asNetwork(Cold_War_graph)
+
+balance %>% 
+  filter(year >1992 & year <2014) %>% 
+  select(cowc1,cowc2,year,troops,deployer_regime,receptor_regime,milper,deployer_continent,
+         e_gdp) %>% 
+  na.omit()->period_1992_2014
+
+period_1992_2014_graph=period_1992_2014 %>% graph_from_data_frame() 
+
+
+
+period_1992_2014_graph= period_1992_2014_graph %>% set_vertex_attr( "deployer_regime", index = V(period_1992_2014_graph), as.factor(period_1992_2014$deployer_regime)) %>% 
+  set_vertex_attr( "milper", index = V(period_1992_2014_graph), as.numeric(period_1992_2014$milper)) %>% 
+  set_vertex_attr( "e_gdp", index = V(period_1992_2014_graph), as.numeric(period_1992_2014$e_gdp)) %>% 
+  set_vertex_attr( "deployer_continent", index = V(period_1992_2014_graph), as.factor(period_1992_2014$deployer_continent))
+
+
+
+period_1992_2014_network <- asNetwork(period_1992_2014_graph)
+
+balance %>% 
+  filter(year >=2014) %>% 
+  select(cowc1,cowc2,year,troops,deployer_regime,receptor_regime,milper,deployer_continent,
+         e_gdp) %>% 
+  na.omit()->after_2014
+
+after_2014_graph=after_2014 %>% graph_from_data_frame() 
+
+
+
+after_2014_graph= after_2014_graph %>% set_vertex_attr( "deployer_regime", index = V(after_2014_graph), as.factor(after_2014$deployer_regime)) %>% 
+  set_vertex_attr( "milper", index = V(after_2014_graph), as.numeric(after_2014$milper)) %>% 
+  set_vertex_attr( "e_gdp", index = V(after_2014_graph), as.numeric(after_2014$e_gdp)) %>% 
+  set_vertex_attr( "deployer_continent", index = V(after_2014_graph), as.factor(after_2014$deployer_continent))
+
+
+
+after_2014_network <- asNetwork(after_2014_graph)
+
+```
+
+
+```{r,message=FALSE,warning=FALSE}
+model1<- ergm(Cold_War_network ~ edges+nodematch('deployer_regime')+absdiff("milper")+absdiff('e_gdp')+
+                nodematch('deployer_continent'))
+summary(model1)
+
+```
+
+
+
+
+```{r,message=FALSE,warning=FALSE}
+model2<- ergm(period_1992_2014_network ~ edges+nodematch('deployer_regime')+absdiff("milper")+absdiff('e_gdp')+
+                nodematch('deployer_continent'))
+summary(model2)
+
+```
+
+
+```{r,message=F,warning=FALSE}
+model3<- ergm(after_2014_network ~ edges+nodematch('deployer_regime')+absdiff("milper")+absdiff('e_gdp')+
+                nodematch('deployer_continent'))
+summary(model3)
+```
+
+Соберем модели в один лист, чтоб сранить результаты
+
+```{r,message=FALSE,warning=FALSE}
+models <- list(model1,model2,model3)
+
+
+
+modelsummary(models)
+```
+
+По результатам выдачи можно увидеть как постепенно уменьшается гомофилия по режимам. То есть в в годы после Холодной Войны страны отправляют войска и регионы с противоположным режимом. Вывод вполне логичный - после развала СССР у США и их союников нет сербезных препятствий для отправления войск в авторитарные возможно враждебные страны с целью удержания их в зоне влияния. 
+
+На основе результатов по численности национальных армий сложно говорить о гомофилии или ее отсутсвии из-за очень малых окенок коэффициентов.
+Аналогичное можно сказать и про ВВП.
+
+В то время как котиненты показали очень интересные результаты:действительно со временем появляется континентальная гомофилия - страны в основном отправляют свои войск в регионы своего же континента. То есть определенный паттерн деценрализации есть.
+
+
+Попробуев выявить динамику роста региональных организаций внутри континентов.
+
+Начнем с важной границы сопррикосновения нескольких альянсов - Восточной Европы.Еще в первой четверти XX века Юзеф Пилсудсукий предлагал альянс "Междуморье",который должен был включать в себя Польшу, Украину, Беларусь, Литву, Латвию, Эстонию, Молдову, Венгрию, Румынию, Югославию, Чехословакию, а также, возможно, Финляндию.
+
+В 2015 году об этой идее вспомнил президент Польши Анджи Дуда в контексте постепенно обострения конфликта России и Украины. В 2016 году состоялся саммит возможных будущих членов - Эстонии, Латвии, Литвы, Польши, Чехии, Словакии, Австрии, Венгрии, Словении, Хорватии, Румынии, Болгарии. В контексте событий 24 февраля Украина также становится потенциальным членом - так как НАТО не может напрямую вмешиваться в конфликт, "Междуморье" может сыграть важную роль в Восточной Европе.
+
+
+```{r,message=F,warning=F}
+library(igraph)
+
+balance$period2014 <- ifelse(balance$year<2014,'before 2014','after 2014')
+
+intermarium_vec <- c(366,367,368,369,316,317,310,305,349,344,360,355,290,2)
+
+balance %>% filter(ccode1 %in% intermarium_vec & ccode2 %in% intermarium_vec) %>%
+  select(cowc1,cowc2,year,troops,period2014) %>% graph_from_data_frame()->intermarium_net
+
+
+intermarium_tbl=intermarium_net %>% as_tbl_graph()
+
+ggraph(intermarium_tbl) +
+  geom_edge_link(aes(color=as.factor(period2014),width=scale(troops)),
+                 end_cap = circle(3, 'mm'),
+                 arrow = arrow(angle = 15, type = "closed", length = unit(3, 'mm'))) + 
+  geom_node_point(color='blue') + 
+  geom_node_label(aes(label=name), size = 4)  +
+  scale_edge_color_manual(values=c('navyblue','brown1'))+
+  ggtitle('Intermarium alliance and US')+
+  theme_void()
+```
+
+Как видно на графике после 2014 года возникает множестов новых связей, хоть США и играет значительную роль и они отправляют наибольшее число войск, можно предпологать будущее гипотетическое существование "Междуморья" как самостоятельной части НАТО. 
+
+
+
+
+```{r,message=FALSE,warning=FALSE}
+balance %>% filter(deployer_continent=='Africa' & receptor_continent=='Africa') %>% 
+  dplyr::select(cowc1,cowc2,troops,period2014) %>% na.omit() %>% as_tbl_graph()-> Africa
+wc <- cluster_fast_greedy(as.undirected(Africa))
+table <- cbind(wc$membership, wc$names)
+table = as.data.frame(table)
+V(Africa)$cl = as.character(table$V1[match(V(Africa)$name, table$V2)])
+
+
+ggraph(Africa, layout = "fr") +
+  geom_edge_link( arrow = arrow(type = "closed",
+                                              angle = 25,
+                                              length = unit(1.5, 'mm')), 
+                 end_cap = circle(0.5, 'mm'), 
+                 aes(width=troops/10,color=as.factor(period2014)) , show.legend = FALSE) +
+  geom_node_point(aes(color = cl,size=100*degree(Africa))) +
+  geom_node_text(aes(label = name,size=degree(Africa)*60,alpha=degree(Africa)*60), repel = TRUE) +
+  scale_edge_color_manual(values=c('navyblue','brown1'))+
+  labs(title ='Сообщества в Африке')+
+  theme_void()
+```
+
+
+
+
+```{r}
+
+ggraph(g2022,layout='stress')+
+  geom_edge_link0(arrow = arrow(type = "closed",
+                                angle = 25,
+                                length = unit(1.5, 'mm')), 
+                  aes(edge_color=Peace))+
+  geom_node_text(aes(label = name,size=degree(g2022)*60,alpha=degree(g2022)*60), 
+                 family='serif',repel = TRUE) +
+  ggtitle('Deployment and Peacekeeping in 2022')+
+  theme_graph()
+
+ggsave("~/Изоляты/1 img/Nets.jpg", width = 20, height = 15, units = "cm",dpi=1200)
+```
+
+
+
+
+
+
+
+```{r}
+balance %>% filter(deployer_continent=='Asia' & receptor_continent=='Asia') %>% 
+  dplyr::select(cowc1,cowc2,troops,period2014) %>% na.omit() %>% as_tbl_graph()-> Asia
+wc <- cluster_fast_greedy(as.undirected(Asia))
+table <- cbind(wc$membership, wc$names)
+table = as.data.frame(table)
+V(Asia)$cl = as.character(table$V1[match(V(Asia)$name, table$V2)])
+
+
+ggraph(Asia, layout = "fr") +
+  geom_edge_link( arrow = arrow(type = "closed",
+                                angle = 25,
+                                length = unit(1.5, 'mm')), 
+                  end_cap = circle(0.5, 'mm'), 
+                  aes(width=troops/10,color=as.factor(period2014)) , show.legend = FALSE) +
+  geom_node_point(aes(color = cl,size=100*degree(Asia))) +
+  geom_node_text(aes(label = name,size=degree(Asia)*60,alpha=degree(Asia)*60), repel = TRUE) +
+  scale_edge_color_manual(values=c('navyblue','brown1'))+
+  labs(title ='Сообщества в Азии')+
+  theme_void()
+```
+
+По странам Африки и Азии сложно выделить отдельные значительные сообщества. Концептуально можно разделить следующие группы
+
+ - Бывшие колонии и нынешние союбзники Франции в Азии
+ - Бывшие колонии и нынещние союзники Франции в Африке
+ - Бывшие колонии и нынещние союзники Великобритании в Африке
+ - Бывшие колонии и нынещние союзники Великобритании в Африке
+ - Союзники России
+ 
+Можно ярко проследить возникновение новых связей после 2014 года в Азии, чего не скажешь об Африке.
+ 
+ 
+ 
+ 
+## Список использованной литературы
+
+Сайты:
+ 
+ * https://correlatesofwar.org/
+ * https://www.tandfonline.com/loi/tmib20
+ * https://www.nato.int/
+ * https://www.un.org/en/
+ * https://www.osce.org/
+ * https://www.iwp.edu/articles/2020/12/23/intermarium-in-the-21st-century/
+
+Исследования:
+
+ * Heo, Uk, and Min Ye. "US military deployment and host-nation economic growth." Armed Forces & Society 45.2 (2019): 234-267.
+ 
+ * Haesebrouck, Tim, and Anouschka van Immerseel. "When does politics stop at the water’s edge? A QCA of parliamentary consensus on military deployment decisions." European political science review 12.3 (2020): 371-390.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
