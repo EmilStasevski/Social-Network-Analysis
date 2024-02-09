@@ -1,0 +1,183 @@
+---
+title: "DS Minor: Practice 02, центральность и комьюнити"
+output: 
+  html_document: 
+    code_folding: show
+    theme: cosmo
+editor_options: 
+  chunk_output_type: console
+---
+
+Данные на выбор -- выберите, какая тема вам интереснее
+
+```{r}
+library(igraph)
+library(readr)
+library(dplyr)
+```
+
+1) International Trade Network (ITN) <https://github.com/MatthewSmith430/ITNr>
+
+```{r}
+library(ITNr)
+data("ELEnet16") #уже в виде сети
+(ELEnet16)
+?ELEnet16
+```
+
+2) Встречаемость персонажей в комиксах Marvel <https://www.kaggle.com/csanhueza/the-marvel-universe-social-network/version/1#nodes.csv>
+
+```{r}
+marvel <- read_csv("~/shared/minor2_2021/2-tm-net/lab02-centrality-community/marvel.csv")
+```
+
+3) Дружба в школе. Подробное описание данных `?highschool_boys`
+
+```{r}
+# remotes::install_github("schochastics/networkdata")
+library(networkdata)
+data(highschool_boys) # уже в виде сети
+?highschool_boys
+```
+
+4) Взаимодействия среди животных: зебры. Подробнее `?animal_34`
+
+```{r}
+library(networkdata)
+data(animal_34) # уже в виде сети
+?animal_34
+```
+
+# ELEnet16
+
+Сперва начнём с политической сети.
+
+Какие вопросы нас могут интересовать? Какие гипотезы мы можем придумать?
+
+## Шаг 1 Рисование
+
+Сперва посмотим, какой у нас есть объект и что там внутри
+
+```{r}
+
+class(ELEnet16)
+
+V(ELEnet16)
+
+E(ELEnet16)
+
+ELEnet16
+```
+
+и быстро нарисуем. Какие настройки мы тут применяем?
+
+```{r}
+V(ELEnet16)$region
+
+plot(ELEnet16, 
+     vertex.size = degree(ELEnet16)/10, 
+     vertex.label.cex = degree(ELEnet16)/300,
+     vertex.color  = V(ELEnet16)$region,
+     layout = layout.davidson.harel)
+```
+
+Как найти важные вершины в этой сети?
+
+# Marvel
+
+```{r}
+# plot(marvel)
+```
+
+Почему не получилось нарисовать? Как узнать что это такое?
+
+```{r}
+marvel %>% head(100)
+
+g_marvel <- graph_from_data_frame(marvel)
+g_marvel
+```
+
+быстро нарисуем
+
+```{r}
+plot(g_marvel)
+```
+
+Есть ли какой-то супер-герой, которого вы знаете?
+Как выделить его на сети?
+
+## Шаг 2 Центральности
+
++ Кто в сети самый популярный? 
++ Что это может значить и как это можно использовать? 
++ Будет ли на такой сети центральность?
+
+```{r}
+degree(g_marvel)
+class(degree(g_marvel))
+```
+
+```{r}
+betweenness(g_marvel)
+```
+
+
+# highschool_boys
+
+```{r}
+plot(highschool_boys)
+highschool_boys
+?highschool_boys
+```
+
+что такое time (e/n)?
+
+Тогда давайте сделаем 2 сети и сравним их
+
+```{r}
+highschool_boys_1 <- delete_edges(highschool_boys, which(E(highschool_boys)$time == 1))
+highschool_boys_2 <- delete_edges(highschool_boys, which(E(highschool_boys)$time == 2))
+```
+
+
+## Шаг 3 Выделение сообществ
+
+Кластеризация и описание полученых групп. По какому признаку поделилась сеть? 
+
++ Какие методы помните?
++ как выбрать метод?
+
+
+```{r}
+# fgcommune <- fastgreedy.community(highschool_boys_1)
+# sgcommune <-  spinglass.community(highschool_boys_1)
+ebcommune <- edge.betweenness.community(highschool_boys_1)
+wtcommune <- walktrap.community(highschool_boys_1)
+```
+
+Мы выяснили, что не все алгоритмы работают с нашей сетью. Что же делать?
+
+```{r}
+plot(highschool_boys_1)
+
+highschool_boys_1_copy <- delete_vertices(highschool_boys_1, which(V(highschool_boys)$name == "3"))
+plot(highschool_boys_1_copy)
+
+sgcommune <-  spinglass.community(highschool_boys_1_copy)
+```
+
+Какой выберем?
+
+```{r}
+modularity(sgcommune)
+modularity(wtcommune)
+modularity(ebcommune)
+```
+
+А как нарисовать?
+
+```{r}
+plot(wtcommune, highschool_boys_1)
+```
+

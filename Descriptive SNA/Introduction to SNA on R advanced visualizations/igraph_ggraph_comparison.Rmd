@@ -1,0 +1,191 @@
+---
+title: "Tutorial on drawing graphs"
+output: html_document
+---
+
+```{r}
+library(ggraph)
+library(igraph)
+library(tidyverse)
+
+load('~/shared/minor2_2021/2-tm-net/lab03-visualization/Social_Evolution.RData')
+
+head(actors)
+head(calls)
+head(friendship)
+
+
+calls = calls %>%
+  count(sender,receiver) %>% 
+  mutate(cats = case_when(n > 50 ~ "strong",
+                          n > 5 ~ "medium",
+                          n <= 5 ~ "weak"))
+
+
+calls_net = graph_from_data_frame(calls, directed = T) 
+
+V(calls_net)
+E(calls_net)
+
+E(calls_net)$n = calls$n
+E(calls_net)$cat = calls$cat
+
+actors = actors %>% 
+  arrange(as.character(label))
+
+actors = actors %>% 
+  filter(label %in% V(calls_net)$name)
+
+V(calls_net)$floor = actors$floor
+V(calls_net)$grade = actors$gradeType
+
+V(calls_net)
+```
+
+# сети без деталей
+
+```{r}
+plot(calls_net,
+     vertex.size = 3,
+     vertex.label = NA,
+     edge.color = "black")
+
+?igraph::plot
+
+ggraph(calls_net) + 
+    geom_edge_link() + 
+    geom_node_point()  +
+  theme_void()
+```
+
+# добавить названия
+
+```{r}
+plot(calls_net,
+     vertex.size = 3,
+     edge.color = "black")
+
+ggraph(calls_net) + 
+    geom_edge_link() + 
+    geom_node_point() + 
+    geom_node_text(aes(label=name))  +
+  theme_void()
+```
+
+# убрать часть имен по условию
+
+```{r}
+plot(calls_net,
+     vertex.size = 3,
+     edge.color = "black",
+     vertex.label = case_when(V(calls_net)$grade == 1 ~ V(calls_net)$name)
+     )
+
+ggraph(calls_net) + 
+    geom_edge_link() + 
+    geom_node_text(aes(label=case_when(grade == 1 ~ name))) +
+  theme_void()
+```
+
+# Цвета вершин
+
+```{r}
+plot(calls_net,
+     vertex.size = 4,
+     edge.color = "black",
+     vertex.label = case_when(V(calls_net)$grade == 1 ~ V(calls_net)$name),
+     vertex.color = V(calls_net)$floor)
+
+
+ggraph(calls_net) + 
+    geom_edge_link() + 
+    geom_node_point(aes(color = as.factor(floor))) +
+  geom_node_text(aes(label=case_when(grade == 1 ~ name))) +
+  theme_void()
+```
+
+# Размер вершин
+
+```{r}
+plot(calls_net,
+     vertex.size = degree(calls_net),
+     edge.color = "black",
+     vertex.label = case_when(V(calls_net)$grade == 1 ~ V(calls_net)$name),
+     vertex.color = V(calls_net)$floor)
+
+
+ggraph(calls_net) + 
+    geom_edge_link() + 
+    geom_node_point(aes(color = as.factor(floor),size= degree(calls_net))) +
+  geom_node_text(aes(label=case_when(grade == 1 ~ name)))+ 
+  theme_void()
+```
+
+# регулируем отображение связей
+
+```{r}
+plot(calls_net,
+     vertex.size = degree(calls_net),
+     edge.color = E(calls_net)$cat, # не работает
+     vertex.label = case_when(V(calls_net)$grade == 1 ~ V(calls_net)$name),
+     vertex.color = V(calls_net)$floor) 
+
+unique(E(calls_net)$cat)
+
+E(calls_net)$cat1 = case_when(calls$n > 50 ~ "red",
+                               calls$n > 5 ~ "orange",
+                               calls$n <= 5 ~ "yellow")
+
+plot(calls_net,
+     vertex.size = degree(calls_net),
+     edge.color = E(calls_net)$cat1,
+     vertex.label = case_when(V(calls_net)$grade == 1 ~ V(calls_net)$name),
+     vertex.color = V(calls_net)$floor)
+
+
+ggraph(calls_net) + 
+    geom_edge_link(aes(color = cat)) + # работает без необходимости уточнять цвета
+    geom_node_point(aes(color = as.factor(floor),size= degree(calls_net))) +
+  geom_node_text(aes(label=case_when(grade == 1 ~ name)))+ 
+  theme_void()
+```
+
+# регулировка ширины связей
+
+```{r}
+plot(calls_net,
+     vertex.size = degree(calls_net),
+     edge.color = E(calls_net)$cat1,
+     edge.width = log(E(calls_net)$n),
+     vertex.label = case_when(V(calls_net)$grade == 1 ~ V(calls_net)$name),
+     vertex.color = V(calls_net)$floor) 
+
+ggraph(calls_net) + 
+    geom_edge_link(aes(color = cat, width = log(n))) + # работает без необходимости уточнять цвета
+    geom_node_point(aes(color = as.factor(floor),size= degree(calls_net))) +
+  geom_node_text(aes(label=case_when(grade == 1 ~ name)))+ 
+  theme_void()
+```
+
+### Основной 
+
+Чтобы чуть подробнее посмотреть на "самую связанную" часть сети, оставим только основную компоненту связности (Giant component)
+
+```{r}
+?CINNA::giant_component_extract
+
+calls_net_gc = CINNA::giant_component_extract(calls_net)
+
+calls_net_gc = calls_net_gc[[1]] ## оставим только объекст igraph
+```
+
+Теперь попробуйте нарисовать новую сеть
+
+Стало лучше?
+
+```{r}
+ggraph(calls_net_gc) +
+geom_edge_link(aes(color = cat, width = log(n))) + # работает без необходимости уточнять цвета
+geom_node_point(aes(color = as.factor(floor),size= degree(calls_net_gc))) +
+geom_node_text(aes(label=case_when(grade == 1 ~ name)))+
+theme_void()
